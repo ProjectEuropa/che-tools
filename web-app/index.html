@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CHE Tools - 統合エディタ</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1 class="logo">
+                <span class="logo-icon">⚔️</span>
+                CHE Tools
+            </h1>
+            <p class="subtitle">チームエディタ・勝敗表・結果集計</p>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="team-editor">
+                <span class="tab-icon">📋</span>
+                チーム編集
+            </button>
+            <button class="tab-btn" data-tab="table-viewer">
+                <span class="tab-icon">📊</span>
+                勝敗表
+            </button>
+            <button class="tab-btn" data-tab="result-calc">
+                <span class="tab-icon">🏆</span>
+                結果集計
+            </button>
+        </nav>
+
+        <!-- Drop Zone -->
+        <div id="drop-zone" class="drop-zone">
+            <div class="drop-content">
+                <span class="drop-icon">📁</span>
+                <p>CHEファイルをドラッグ＆ドロップ</p>
+                <p class="drop-hint">または</p>
+                <label class="file-btn">
+                    ファイルを選択
+                    <input type="file" id="file-input" accept=".CHE,.che" multiple hidden>
+                </label>
+            </div>
+        </div>
+
+        <!-- File List -->
+        <div id="file-list" class="file-list hidden">
+            <h3>読み込まれたファイル</h3>
+            <ul id="loaded-files"></ul>
+        </div>
+
+        <!-- Tab Contents -->
+        <main class="tab-content">
+            <!-- Team Editor Tab -->
+            <section id="team-editor" class="tab-panel active">
+                <div class="editor-container">
+                    <div class="team-list-panel">
+                        <h3>利用可能なチーム</h3>
+                        <div class="controls">
+                            <button id="select-all" class="btn-sm">全選択</button>
+                            <button id="shuffle-btn" class="btn-sm">シャッフル</button>
+                        </div>
+                        <ul id="source-teams" class="team-list"></ul>
+                    </div>
+                    <div class="transfer-controls">
+                        <button id="add-team" class="transfer-btn" title="追加">▶</button>
+                        <button id="remove-team" class="transfer-btn" title="削除">◀</button>
+                        <button id="move-up" class="transfer-btn" title="上へ">▲</button>
+                        <button id="move-down" class="transfer-btn" title="下へ">▼</button>
+                    </div>
+                    <div class="team-list-panel">
+                        <h3>出力チーム <span id="team-count">(0/16)</span></h3>
+                        <div class="controls">
+                            <button id="clear-output" class="btn-sm btn-danger">クリア</button>
+                            <button id="reverse-btn" class="btn-sm">反転</button>
+                        </div>
+                        <ul id="output-teams" class="team-list"></ul>
+                    </div>
+                </div>
+                <div class="action-bar">
+                    <div class="save-options">
+                        <div class="input-group" style="display: inline-block; margin-right: 15px;">
+                            <label>大会名:</label>
+                            <input type="text" id="tournament-name" value="新規大会" maxlength="32" style="padding: 5px;">
+                        </div>
+                        <label>保存形式:</label>
+                        <select id="save-format">
+                            <option value="match">マッチデータ (.CHE)</option>
+                            <option value="team">チームデータ連結</option>
+                        </select>
+                    </div>
+                    <button id="save-che" class="btn btn-primary" disabled>CHEファイルを保存</button>
+                </div>
+            </section>
+
+            <!-- Table Viewer Tab -->
+            <section id="table-viewer" class="tab-panel">
+                <div class="viewer-container">
+                    <div id="match-info" class="match-info"></div>
+
+                    <h3 style="margin-top: 20px;">対戦表 (クリックで編集)</h3>
+                    <div id="table-container" class="table-container" style="overflow-x: auto; margin-bottom: 30px;">
+                    </div>
+
+                    <h3 style="margin-top: 20px;">対戦表 (逆順)</h3>
+                    <div id="table-container-reverse" class="table-container"
+                        style="overflow-x: auto; margin-bottom: 30px;"></div>
+
+                    <h3>集計結果 (登録順)</h3>
+                    <div id="result-table-container" class="table-container" style="margin-bottom: 30px;"></div>
+
+                    <h3>集計結果 (逆順)</h3>
+                    <div id="result-table-container-reverse" class="table-container"></div>
+                    <div id="team-detail" class="team-detail hidden"></div>
+                </div>
+            </section>
+
+            <!-- Result Calculator Tab -->
+            <section id="result-calc" class="tab-panel">
+                <div class="calc-container">
+                    <div class="calc-options">
+                        <h3>集計オプション</h3>
+
+                        <div class="option-group">
+                            <label>データソース:</label>
+                            <select id="data-source">
+                                <option value="asc">正順データ</option>
+                                <option value="desc">逆順データ</option>
+                                <option value="merged">両方を合算</option>
+                            </select>
+                        </div>
+
+                        <div class="option-group">
+                            <label>勝点設定:</label>
+                            <div class="point-inputs">
+                                <label>勝<input type="number" id="win-point" value="3" min="0"></label>
+                                <label>分<input type="number" id="draw-point" value="1" min="0"></label>
+                                <label>敗<input type="number" id="lose-point" value="0" min="0"></label>
+                            </div>
+                        </div>
+
+                        <button id="calc-button" class="btn btn-primary">集計実行</button>
+                    </div>
+                    <div class="calc-results">
+                        <div
+                            style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                            <h3>集計結果</h3>
+                            <button id="reset-ranking" class="btn btn-secondary">順位をリセット</button>
+                        </div>
+                        <div id="standings-table"></div>
+                        <div class="result-actions">
+                            <button id="copy-result" class="btn btn-secondary">結果をコピー</button>
+                        </div>
+                        <pre id="result-text" class="result-text"></pre>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>CHE Tools Web Edition</p>
+        </footer>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast hidden"></div>
+
+    <!-- Scripts -->
+    <script src="lib/encoding.js"></script>
+    <script src="js/che-parser.js"></script>
+    <script src="js/team-editor.js"></script>
+    <script src="js/table-viewer.js"></script>
+    <script src="js/result-calc.js"></script>
+    <script src="js/app.js"></script>
+</body>
+
+</html>
