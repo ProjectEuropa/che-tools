@@ -462,6 +462,9 @@ const CHEParser = {
         // OKEブロックインデックスをリセット（各生成時に0から開始）
         this._nextOkeBlockIndex = 0;
 
+        // 元のインデックスから新しいインデックスへのマッピング（全チームで共有）
+        const indexMap = {};
+
         // 2. 選択したチームのスロットのみ上書き（最大16チーム、残りはテンプレートのまま）
         teams.slice(0, 16).forEach((team, index) => {
             const slotStart = SLOT_START_OFFSET + (index * SLOT_SIZE);
@@ -484,9 +487,6 @@ const CHEParser = {
                 if (team.okeBlocks && team.okeBlocks.length > 0) {
                     const OKE_BLOCK_START = 0x38BC;
                     const OKE_BLOCK_SIZE = 7872;
-
-                    // 元のインデックスから新しいインデックスへのマッピング
-                    const indexMap = {};
 
                     for (const okeBlock of team.okeBlocks) {
                         // 既にマップされていればスキップ（同じOKEを複数回コピーしない）

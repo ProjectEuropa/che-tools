@@ -394,41 +394,64 @@ const TeamEditor = {
     },
 
     /**
-     * ドラッグ&ドロップ機能を設定
+     * ドラッグ&ドロップ機能を設定（イベントデリゲーション方式）
      */
     setupDragAndDrop: function (listId, listProp) {
         const list = document.getElementById(listId);
         if (!list) return;
 
+        // 既存のイベントリスナーを削除（重複登録を防ぐ）
+        if (list._dragHandlers) {
+            list.removeEventListener('dragstart', list._dragHandlers.dragstart, true);
+            list.removeEventListener('dragend', list._dragHandlers.dragend, true);
+            list.removeEventListener('dragover', list._dragHandlers.dragover);
+            list.removeEventListener('drop', list._dragHandlers.drop);
+        }
+
         let draggedItem = null;
 
-        list.querySelectorAll('li').forEach(item => {
-            item.addEventListener('dragstart', (e) => {
-                draggedItem = item;
-                item.style.opacity = '0.5';
-                e.dataTransfer.effectAllowed = 'move';
-            });
-
-            item.addEventListener('dragend', (e) => {
-                item.style.opacity = '';
-                draggedItem = null;
-            });
-
-            item.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                const afterElement = this.getDragAfterElement(list, e.clientY);
-                if (afterElement == null) {
-                    list.appendChild(draggedItem);
-                } else {
-                    list.insertBefore(draggedItem, afterElement);
+        // イベントハンドラーを作成（後で削除できるように保存）
+        const handlers = {
+            dragstart: (e) => {
+                if (e.target.tagName === 'LI') {
+                    draggedItem = e.target;
+                    e.target.style.opacity = '0.5';
+                    e.dataTransfer.effectAllowed = 'move';
                 }
-            });
-
-            item.addEventListener('drop', (e) => {
+            },
+            dragend: (e) => {
+                if (e.target.tagName === 'LI') {
+                    e.target.style.opacity = '';
+                    draggedItem = null;
+                }
+            },
+            dragover: (e) => {
                 e.preventDefault();
-                this.updateListOrder(listId, listProp);
-            });
-        });
+                if (draggedItem) {
+                    const afterElement = this.getDragAfterElement(list, e.clientY);
+                    if (afterElement == null) {
+                        list.appendChild(draggedItem);
+                    } else {
+                        list.insertBefore(draggedItem, afterElement);
+                    }
+                }
+            },
+            drop: (e) => {
+                e.preventDefault();
+                if (draggedItem) {
+                    this.updateListOrder(listId, listProp);
+                }
+            }
+        };
+
+        // 親要素にイベントリスナーを設定（イベントデリゲーション）
+        list.addEventListener('dragstart', handlers.dragstart, true);
+        list.addEventListener('dragend', handlers.dragend, true);
+        list.addEventListener('dragover', handlers.dragover);
+        list.addEventListener('drop', handlers.drop);
+
+        // ハンドラーを保存（次回の呼び出し時に削除できるように）
+        list._dragHandlers = handlers;
     },
 
     /**
