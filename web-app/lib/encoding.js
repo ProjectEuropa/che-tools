@@ -275,6 +275,10 @@ if (typeof TextDecoder !== 'undefined') {
 
     // 基本的な漢字の変換テーブルを構築
     // JIS第一水準漢字（16区〜47区）の一部
+    //
+    // ⚠️ 警告: このテーブルは限定的なカバレッジのみ提供します
+    // 約60文字の漢字のみ含まれており、テーブル外の文字は'?'に置換されます
+    // より広範な漢字のサポートが必要な場合は、完全なShift-JISライブラリの使用を検討してください
     const commonKanji = {
         // よく使う漢字
         '新': 0x9056, '規': 0x8B4B, '大': 0x91E5, '会': 0x89EF,
@@ -378,6 +382,7 @@ if (typeof TextDecoder !== 'undefined') {
 
             // 未知の文字は?に置換
             // 0x00にすると文字列がそこで終了してしまうため、0x3F(?)を使用
+            console.warn(`Unsupported character in Shift-JIS conversion: '${str[i]}' (U+${charCode.toString(16).toUpperCase().padStart(4, '0')}) replaced with '?'`);
             bytes.push(0x3F);
         }
 

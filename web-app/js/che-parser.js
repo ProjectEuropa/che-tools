@@ -402,9 +402,17 @@ const CHEParser = {
             const buffer = await response.arrayBuffer();
             this.templateData = new Uint8Array(buffer);
             console.log('Template loaded:', this.templateData.byteLength);
+            return true;
         } catch (e) {
             console.error('Failed to load template:', e);
-            alert('テンプレートファイルの読み込みに失敗しました。');
+            this.templateData = null;
+            // トースト通知を使用（index.htmlで定義されている）
+            if (typeof showToast === 'function') {
+                showToast('テンプレートファイルの読み込みに失敗しました。', 'error');
+            } else {
+                alert('テンプレートファイルの読み込みに失敗しました。');
+            }
+            return false;
         }
     },
 
@@ -426,6 +434,9 @@ const CHEParser = {
         const SLOT_START_OFFSET = 0x488; // Slot 1からデータ開始
         const OKE_BLOCK_START = 0x38BC;
         const OKE_BLOCK_SIZE = 7872;
+        const OKE_MAGIC = [0xC8, 0xE7, 0xAC, 0x08];
+        const OKE_FLAG = [0x01, 0x00, 0x00, 0x00];
+        const MAX_OKE_BLOCKS = 31;
 
         // バッファ作成 - SML.CHE（動作確認済みテンプレート）を完全コピー
         const output = new Uint8Array(TOTAL_FILE_SIZE);
@@ -447,13 +458,13 @@ const CHEParser = {
 
         // チーム数・マッチ数を更新
         const teamCount = Math.min(teams.length, 16);
-        const matchCount = teamCount * 2;
+        const matchCount = (teamCount * (teamCount - 1)) / 2; // リーグ戦の場合
         view.setUint32(0x34, teamCount, true);
         view.setUint32(0x38, matchCount, true);
         view.setUint32(0x184, teamCount, true);
         view.setUint32(0x188, matchCount, true);
 
-        console.log(`Generating match file: ${teamCount} teams, tournamentName=${tournamentName}`);
+        console.log(`Generating match file: ${teamCount} teams, ${matchCount} matches, tournamentName=${tournamentName}`);
 
         if (teams.length > 16) {
             console.warn(`Warning: ${teams.length} teams provided, but only first 16 will be used`);
@@ -495,21 +506,26 @@ const CHEParser = {
                         }
 
                         const newIndex = this._nextOkeBlockIndex;
-                        if (newIndex < 31) {
+                        if (newIndex < MAX_OKE_BLOCKS) {
                             const blockData = new Uint8Array(okeBlock.data);
                             const destOffset = OKE_BLOCK_START + newIndex * OKE_BLOCK_SIZE;
 
-                            // OKEブロックをコピー
-                            for (let p = 0; p < OKE_BLOCK_SIZE && p < blockData.length; p++) {
-                                output[destOffset + p] = blockData[p];
+                            // バッファオーバーフロー防止
+                            if (destOffset + OKE_BLOCK_SIZE > TOTAL_FILE_SIZE) {
+                                console.warn(`OKE block ${newIndex} would exceed file size, skipping`);
+                                continue;
                             }
+
+                            // OKEブロックをコピー（output.set()で効率化）
+                            const copySize = Math.min(OKE_BLOCK_SIZE, blockData.length);
+                            output.set(blockData.slice(0, copySize), destOffset);
 
                             indexMap[okeBlock.originalIndex] = newIndex;
                             this._nextOkeBlockIndex++;
 
-                            // OKE名を取得してログ
-                            const okeName = new TextDecoder('shift-jis', { fatal: false })
-                                .decode(blockData.slice(0x1C94, 0x1C94 + 24)).replace(/\0/g, '');
+                            // OKE名を取得してログ（Encoding.toUTF8を使用）
+                            const okeNameBytes = blockData.slice(0x1C94, 0x1C94 + 24);
+                            const okeName = Encoding.toUTF8(okeNameBytes).replace(/\0/g, '');
                             console.log(`    OKE Block ${okeBlock.originalIndex} -> ${newIndex}: ${okeName}`);
                         }
                     }
@@ -551,8 +567,6 @@ const CHEParser = {
                 // OKEサマリーの初期化（無効スロットを有効化）
                 // SML.CHEのBlock 0,1,2に有効なOKEがある（ほのお/くさ/みずタイプ）
                 // 構造: [index(4B)][magic(4B)][flag(4B)][stats(36B)]
-                const OKE_MAGIC = [0xC8, 0xE7, 0xAC, 0x08];
-                const OKE_FLAG = [0x01, 0x00, 0x00, 0x00];
                 const BASE_OKE_INDICES = [0, 1, 2]; // Block 0,1,2の有効なOKEを参照
 
                 for (let okeNum = 0; okeNum < 3; okeNum++) {
@@ -646,6 +660,7 @@ const CHEParser = {
             view.setUint8(matchStartOffset + byteOffset, currentByte);
         }
 
+        console.log('Match file generation complete');
         return output.buffer;
     }
 };

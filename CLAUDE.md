@@ -42,11 +42,10 @@ Carnage Heart EXA（PSP用ゲーム）のCHEファイルを操作するWebアプ
 
 ### OKEプログラム変換
 
-team.CHE → match.CHE変換時、OKEプログラムは2ブロックにまたがって格納:
-- Block N +0x1C94: プログラム先頭556バイト
-- Block N+1 +0x0000: プログラム残り7316バイト
-
-各チームに6ブロック割り当て（3 OKE × 2ブロック）。
+team.CHE → match.CHE変換時の注意事項:
+- match.CHEのOKEブロックにはAIプログラムコード全体は含まれない
+- 表示用サマリー情報（OKE名、パレット、ビットマップ）のみ格納
+- team.CHE由来のチームは、テンプレートの既存OKEを参照する形で変換
 
 ### 重要な制約
 
@@ -72,7 +71,7 @@ team.CHE → match.CHE変換時、OKEプログラムは2ブロックにまたが
     "ghidra": {
       "command": "python",
       "args": [
-        "/Users/masato/Downloads/GhidraMCP/bridge_mcp_ghidra.py/bridge_mcp_ghidra.py",
+        "/path/to/GhidraMCP/bridge_mcp_ghidra.py",
         "--ghidra-server",
         "http://127.0.0.1:8080/"
       ]
