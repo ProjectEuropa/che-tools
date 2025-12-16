@@ -72,7 +72,10 @@ const CHEParser = {
                 owner: owner || '',
                 colors: colors,
                 primaryColor: colors[1] || colors[0] || { r: 128, g: 128, b: 128, a: 255 },
-                sourceIndex: 0
+                sourceIndex: 0,
+                // team.CHE全体をrawBufferとして保存（match.CHE変換時に使用）
+                rawBuffer: buffer.slice(0, buffer.byteLength),
+                isMatchDerived: false // team.CHE由来であることを示す
             });
         }
 
@@ -130,6 +133,27 @@ const CHEParser = {
                 // スロット全体をrawBufferとして保存
                 team.rawBuffer = buffer.slice(offset, offset + SLOT_SIZE);
                 team.isMatchDerived = true; // match.CHE由来であることを示すフラグ
+
+                // OKEブロックデータも保存（新ファイル生成時にコピーするため）
+                const OKE_BLOCK_START = 0x38BC;
+                const OKE_BLOCK_SIZE = 7872;
+                team.okeBlocks = [];
+
+                for (let okeNum = 0; okeNum < 3; okeNum++) {
+                    const okeIndexOffset = offset + 0xB8 + okeNum * 48;
+                    const okeIndex = this.readUint32(bytes, okeIndexOffset);
+
+                    if (okeIndex < 31) {
+                        const blockOffset = OKE_BLOCK_START + okeIndex * OKE_BLOCK_SIZE;
+                        if (blockOffset + OKE_BLOCK_SIZE <= buffer.byteLength) {
+                            team.okeBlocks.push({
+                                originalIndex: okeIndex,
+                                data: buffer.slice(blockOffset, blockOffset + OKE_BLOCK_SIZE)
+                            });
+                        }
+                    }
+                }
+
                 teams.push(team);
             }
         }
@@ -186,19 +210,17 @@ const CHEParser = {
      * マッチファイル内のチームレコードをパース
      */
     parseMatchTeamRecord: function (bytes, offset) {
-        // カラーパレット (Offset 0x18)
-        // match.CHEの領域(0x18-0x56 = 62bytes)には16色(64bytes)入らないため15色まで
-        const colorOffset = offset + 0x18;
+        // カラーパレット (Offset 0x14)
+        // 16色 x 4バイト = 64バイト (0x14-0x53)
+        const colorOffset = offset + 0x14;
         const colors = [];
-        for (let i = 0; i < 15; i++) {
+        for (let i = 0; i < 16; i++) {
             const r = bytes[colorOffset + i * 4];
             const g = bytes[colorOffset + i * 4 + 1];
             const b = bytes[colorOffset + i * 4 + 2];
             const a = bytes[colorOffset + i * 4 + 3];
             colors.push({ r, g, b, a });
         }
-        // 16色目はダミーを追加
-        colors.push({ r: 0, g: 0, b: 0, a: 0 });
 
         // チーム名 (Offset 0x54へ変更: パレット15色(60byte)直後から始まる可能性対応)
         // 元々0x56としていたが、0x54からデータが始まっているファイルがある模様
@@ -369,147 +391,221 @@ const CHEParser = {
         return output.buffer;
     },
 
+    // テンプレートデータ（template.CHEから読み込む）
+    templateData: null,
+
+    // テンプレート読み込み
+    loadTemplate: async function () {
+        try {
+            const response = await fetch('template.CHE');
+            if (!response.ok) throw new Error('Template load failed');
+            const buffer = await response.arrayBuffer();
+            this.templateData = new Uint8Array(buffer);
+            console.log('Template loaded:', this.templateData.byteLength);
+            return true;
+        } catch (e) {
+            console.error('Failed to load template:', e);
+            this.templateData = null;
+            // トースト通知を使用（index.htmlで定義されている）
+            if (typeof showToast === 'function') {
+                showToast('テンプレートファイルの読み込みに失敗しました。', 'error');
+            } else {
+                alert('テンプレートファイルの読み込みに失敗しました。');
+            }
+            return false;
+        }
+    },
+
     /**
      * CHEファイルを生成（マッチ形式）
      * @param {Array} teams - チームデータ配列
-     * @param {string} tournamentName - 大会名
-     * @returns {ArrayBuffer} CEMDマッチファイル
-     * 注: 勝敗データは保存しない（ユーザー要望により）
+     * @param {String} tournamentName - 大会名
+     * @returns {Uint8Array} 生成されたCHEファイルデータ
      */
+    // 注: 勝敗データは保存しない（ユーザー要望により）
     generateMatchFile: function (teams, tournamentName = '新規大会') {
-        const teamCount = teams.length;
+        if (!this.templateData) {
+            throw new Error('テンプレートが読み込まれていません');
+        }
 
         // 解析に基づく固定パラメータ
         const TOTAL_FILE_SIZE = 266232;
-        const HEADER_SIZE = 0x148;       // 328 bytes
         const SLOT_SIZE = 832;           // 0x340 bytes
         const SLOT_START_OFFSET = 0x488; // Slot 1からデータ開始
+        const OKE_BLOCK_START = 0x38BC;
+        const OKE_BLOCK_SIZE = 7872;
+        const OKE_MAGIC = [0xC8, 0xE7, 0xAC, 0x08];
+        const OKE_FLAG = [0x01, 0x00, 0x00, 0x00];
+        const MAX_OKE_BLOCKS = 31;
 
-        // バッファ作成（ゼロ初期化）
+        // バッファ作成 - SML.CHE（動作確認済みテンプレート）を完全コピー
         const output = new Uint8Array(TOTAL_FILE_SIZE);
         const view = new DataView(output.buffer);
+        output.set(this.templateData.slice(0, TOTAL_FILE_SIZE));
 
-        // 1. ヘッダー情報作成
-        output[0] = 0x43; output[1] = 0x45; output[2] = 0x4D; output[3] = 0x44;
-        view.setUint16(4, HEADER_SIZE, true);
-        const version = "0.0.44";
-        for (let i = 0; i < version.length && i < 8; i++) {
-            output[8 + i] = version.charCodeAt(i);
+        // ヘッダー: 大会名を書き込み
+        const tNameBytes = Encoding.toSJIS(tournamentName);
+        // 0x18: 大会名1
+        for (let i = 0x18; i < 0x28; i++) output[i] = 0;
+        for (let i = 0; i < tNameBytes.length && i < 16; i++) {
+            output[0x18 + i] = tNameBytes[i];
         }
-        const nameBytes = Encoding.toSJIS(tournamentName);
-        for (let i = 0; i < nameBytes.length && i < 32; i++) {
-            output[0x10 + i] = nameBytes[i];
+        // 0x168: 大会名2
+        for (let i = 0x168; i < 0x180; i++) output[i] = 0;
+        for (let i = 0; i < tNameBytes.length && i < 24; i++) {
+            output[0x168 + i] = tNameBytes[i];
         }
-        output[0x30] = 0xCD; output[0x31] = 0xCD; output[0x32] = 0xCD; output[0x33] = 0xCD;
+
+        // チーム数・マッチ数を更新
+        const teamCount = Math.min(teams.length, 16);
+        const matchCount = (teamCount * (teamCount - 1)) / 2; // リーグ戦の場合
         view.setUint32(0x34, teamCount, true);
-        const matchCount = (teamCount * (teamCount - 1)) / 2;
         view.setUint32(0x38, matchCount, true);
-        view.setUint32(0x40, 0, true);
-        view.setFloat32(0x44, 528, true);
-        view.setFloat32(0x48, 120, true);
-        view.setFloat32(0x4C, 1.0, true);
-        for (let i = 0x70; i < 0xE4; i++) {
-            output[i] = 0x01;
+        view.setUint32(0x184, teamCount, true);
+        view.setUint32(0x188, matchCount, true);
+
+        console.log(`Generating match file: ${teamCount} teams, ${matchCount} matches, tournamentName=${tournamentName}`);
+
+        if (teams.length > 16) {
+            console.warn(`Warning: ${teams.length} teams provided, but only first 16 will be used`);
         }
 
-        // 2. チームデータ書き込み
-        teams.forEach((team, index) => {
+        // OKEブロックインデックスをリセット（各生成時に0から開始）
+        this._nextOkeBlockIndex = 0;
+
+        // 元のインデックスから新しいインデックスへのマッピング（全チームで共有）
+        const indexMap = {};
+
+        // 2. 選択したチームのスロットのみ上書き（最大16チーム、残りはテンプレートのまま）
+        teams.slice(0, 16).forEach((team, index) => {
             const slotStart = SLOT_START_OFFSET + (index * SLOT_SIZE);
             if (slotStart + SLOT_SIZE > TOTAL_FILE_SIZE) return;
 
-            // カラーパレット (Offset 0x18)
-            // match.CHEのスペース制限により15色まで
-            const colorOffset = slotStart + 0x18;
+            // デバッグ: チームデータの状態を確認
+            console.log(`Slot ${index + 1}: name=${team.name}, isMatchDerived=${team.isMatchDerived}, hasRawBuffer=${!!team.rawBuffer}, rawBufferSize=${team.rawBuffer ? team.rawBuffer.byteLength : 0}`);
 
-            // match.CHE由来の場合はrawBufferを優先（完全なデータ保持のため）
+            // match.CHE由来のチームはrawBufferをコピーし、OKEブロックも再配置
             if (team.isMatchDerived && team.rawBuffer) {
                 const src = new Uint8Array(team.rawBuffer);
-                // rawBufferはスロット全体なのでOffset 0x18から
-                for (let k = 0; k < 60; k++) { // 15色 * 4 = 60 bytes
-                    output[colorOffset + k] = src[0x18 + k];
+                console.log(`  Copying rawBuffer: size=${src.length}`);
+
+                // スロットデータをコピー
+                for (let k = 0; k < SLOT_SIZE && k < src.length; k++) {
+                    output[slotStart + k] = src[k];
                 }
-            } else if (team.rawBuffer && !team.isMatchDerived) {
-                // team.CHE由来の場合、Offset 0x240から
+
+                // OKEブロックを新しい位置にコピーし、インデックスを更新
+                if (team.okeBlocks && team.okeBlocks.length > 0) {
+                    const OKE_BLOCK_START = 0x38BC;
+                    const OKE_BLOCK_SIZE = 7872;
+
+                    for (const okeBlock of team.okeBlocks) {
+                        // 既にマップされていればスキップ（同じOKEを複数回コピーしない）
+                        if (indexMap[okeBlock.originalIndex] !== undefined) {
+                            continue;
+                        }
+
+                        const newIndex = this._nextOkeBlockIndex;
+                        if (newIndex < MAX_OKE_BLOCKS) {
+                            const blockData = new Uint8Array(okeBlock.data);
+                            const destOffset = OKE_BLOCK_START + newIndex * OKE_BLOCK_SIZE;
+
+                            // バッファオーバーフロー防止
+                            if (destOffset + OKE_BLOCK_SIZE > TOTAL_FILE_SIZE) {
+                                console.warn(`OKE block ${newIndex} would exceed file size, skipping`);
+                                continue;
+                            }
+
+                            // OKEブロックをコピー（output.set()で効率化）
+                            const copySize = Math.min(OKE_BLOCK_SIZE, blockData.length);
+                            output.set(blockData.slice(0, copySize), destOffset);
+
+                            indexMap[okeBlock.originalIndex] = newIndex;
+                            this._nextOkeBlockIndex++;
+
+                            // OKE名を取得してログ（Encoding.toUTF8を使用）
+                            const okeNameBytes = blockData.slice(0x1C94, 0x1C94 + 24);
+                            const okeName = Encoding.toUTF8(okeNameBytes).replace(/\0/g, '');
+                            console.log(`    OKE Block ${okeBlock.originalIndex} -> ${newIndex}: ${okeName}`);
+                        }
+                    }
+
+                    // スロット内のOKEサマリーインデックスを新しい値に更新
+                    for (let okeNum = 0; okeNum < 3; okeNum++) {
+                        const okeIndexOffset = slotStart + 0xB8 + okeNum * 48;
+                        const oldIndex = view.getUint32(okeIndexOffset, true);
+
+                        if (oldIndex < 31 && indexMap[oldIndex] !== undefined) {
+                            view.setUint32(okeIndexOffset, indexMap[oldIndex], true);
+                            console.log(`    Slot OKE${okeNum + 1} index: ${oldIndex} -> ${indexMap[oldIndex]}`);
+                        }
+                    }
+                }
+
+                return; // このチームは処理完了
+            }
+
+            // team.CHE由来の場合
+            if (team.rawBuffer && !team.isMatchDerived) {
                 const src = new Uint8Array(team.rawBuffer);
-                const srcColorOffset = 0x240;
-                for (let k = 0; k < 60; k++) { // 15色 * 4 = 60 bytes
-                    output[colorOffset + k] = src[srcColorOffset + k];
-                }
-            } else if (team.colors && team.colors.length > 0) {
-                // colorsプロパティから生成（新規作成時など）
-                for (let c = 0; c < 15; c++) {
-                    const color = team.colors[c] || team.colors[0];
-                    output[colorOffset + c * 4] = color.r;
-                    output[colorOffset + c * 4 + 1] = color.g;
-                    output[colorOffset + c * 4 + 2] = color.b;
-                    output[colorOffset + c * 4 + 3] = color.a;
-                }
-            }
+                console.log(`  Converting team.CHE: ${team.name}`);
 
-            // チーム名 (Offset 0x54へ変更)
-            const nameOffset = slotStart + 0x54;
-            let tNameBytes;
+                // マッピング: team.CHE → match.CHE slot
+                // team.CHE構造: パレット0x240-0x27F, チーム名0x280, オーナー名0x298
+                const copyMap = [
+                    [0x240, 0x14, 64],   // パレット (0x240-0x27F → 0x14-0x53)
+                    [0x280, 0x54, 24],   // チーム名 (0x280-0x297 → 0x54-0x6B)
+                    [0x298, 0x6C, 24],   // オーナー名 (0x298-0x2AF → 0x6C-0x83)
+                ];
 
-            if (team.rawBuffer) {
-                if (team.isMatchDerived) {
-                    // match.CHE由来の場合、rawBufferはスロット全体
-                    const src = new Uint8Array(team.rawBuffer);
-                    // 0x54から26バイト分確保（余裕を持って）
-                    tNameBytes = src.slice(0x54, 0x54 + 26);
-                } else {
-                    // team.CHE由来の場合、rawBufferは全体データなのでOffset 0x280から
-                    const src = new Uint8Array(team.rawBuffer);
-                    if (src.byteLength >= 0x280 + 24) {
-                        tNameBytes = src.slice(0x280, 0x280 + 24);
-                    } else {
-                        tNameBytes = Encoding.toSJIS(team.name);
+                for (const [srcOff, dstOff, len] of copyMap) {
+                    for (let k = 0; k < len && (srcOff + k) < src.byteLength; k++) {
+                        output[slotStart + dstOff + k] = src[srcOff + k];
                     }
                 }
-            } else {
-                tNameBytes = Encoding.toSJIS(team.name);
-            }
 
-            // 書き込み時は最大26バイトまで許容（パレットとの隙間埋め）
-            for (let k = 0; k < tNameBytes.length && k < 26; k++) {
-                output[nameOffset + k] = tNameBytes[k];
-            }
-            // デバッグ: 書き込みバイト列
-            // console.log(`Write [${slotStart.toString(16)}] Name:`, tNameBytes.slice(0, 10), 'Src:', team.name);
+                // OKEサマリーの初期化（無効スロットを有効化）
+                // SML.CHEのBlock 0,1,2に有効なOKEがある（ほのお/くさ/みずタイプ）
+                // 構造: [index(4B)][magic(4B)][flag(4B)][stats(36B)]
+                const BASE_OKE_INDICES = [0, 1, 2]; // Block 0,1,2の有効なOKEを参照
 
-            // オーナー名 (Offset 0x6Cへ変更)
-            const ownerOffset = slotStart + 0x6C;
-            // output[ownerOffset] = 0x00; // パディング廃止（詰めて書く）
+                for (let okeNum = 0; okeNum < 3; okeNum++) {
+                    const okeOffset = slotStart + 0xB8 + (okeNum * 48);
 
-            let oNameBytes;
-            if (team.rawBuffer) {
-                if (team.isMatchDerived) {
-                    // match.CHE由来の場合
-                    const src = new Uint8Array(team.rawBuffer);
-                    // 0x6Cから24バイトコピー
-                    oNameBytes = src.slice(0x6C, 0x6C + 24);
-                } else {
-                    // team.CHE由来の場合 (Owner Offset 0x298)
-                    const src = new Uint8Array(team.rawBuffer);
-                    if (src.byteLength >= 0x298 + 24) {
-                        oNameBytes = src.slice(0x298, 0x298 + 24);
-                        // パディング除去処理（先頭が00ならスキップ）
-                        let start = 0;
-                        while (start < oNameBytes.length && oNameBytes[start] === 0) start++;
-                        oNameBytes = oNameBytes.slice(start, 24);
-                    } else {
-                        oNameBytes = Encoding.toSJIS(team.owner || '');
+                    // 現在のインデックスを確認
+                    const currentIndex = view.getUint32(okeOffset, true);
+
+                    // 無効(-1)または0xCDパディングの場合、有効なインデックスで初期化
+                    if (currentIndex === 0xFFFFFFFF || currentIndex === 0xCDCDCDCD) {
+                        // インデックスを設定（Slot 0と同じOKEを参照）
+                        view.setUint32(okeOffset, BASE_OKE_INDICES[okeNum], true);
+
+                        // マジックを設定
+                        for (let b = 0; b < 4; b++) {
+                            output[okeOffset + 4 + b] = OKE_MAGIC[b];
+                        }
+
+                        // フラグを設定
+                        for (let b = 0; b < 4; b++) {
+                            output[okeOffset + 8 + b] = OKE_FLAG[b];
+                        }
+
+                        // 統計データはゼロクリア
+                        for (let b = 12; b < 48; b++) {
+                            output[okeOffset + b] = 0;
+                        }
+
+                        console.log(`    OKE${okeNum + 1} initialized: index=${BASE_OKE_INDICES[okeNum]}`);
                     }
                 }
-            } else {
-                oNameBytes = Encoding.toSJIS(team.owner || '');
-            }
 
-            for (let k = 0; k < oNameBytes.length && k < 24; k++) {
-                output[ownerOffset + k] = oNameBytes[k];
+                console.log(`  Done: team.CHE converted`);
             }
-            // デバッグ
-            // console.log(`Write [${slotStart.toString(16)}] Owner (w/pad):`, oNameBytes.slice(0, 10), 'Src:', team.owner);
         });
+
+        // 残りのスロット(teams.length+1 ~ 16)はテンプレートのまま維持
+        // PSPはスロット領域に有効なデータ構造を期待するため、ゼロクリアすると破損扱いになる
+        console.log(`Slots ${teams.length + 1}-16: keeping template data`);
 
         // マッチ結果の書き込み
         // 15チーム総当たり = 105試合
@@ -564,6 +660,7 @@ const CHEParser = {
             view.setUint8(matchStartOffset + byteOffset, currentByte);
         }
 
+        console.log('Match file generation complete');
         return output.buffer;
     }
 };

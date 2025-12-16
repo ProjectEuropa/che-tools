@@ -12,7 +12,8 @@ const TeamEditor = {
     /**
      * 初期化
      */
-    init: function () {
+    init: async function () {
+        await CHEParser.loadTemplate();
         this.bindEvents();
     },
 
@@ -31,6 +32,7 @@ const TeamEditor = {
         document.getElementById('shuffle-btn').addEventListener('click', () => this.shuffle());
         document.getElementById('clear-output').addEventListener('click', () => this.clearOutput());
         document.getElementById('reverse-btn').addEventListener('click', () => this.reverseOutput());
+        document.getElementById('clear-all').addEventListener('click', () => this.clearAll());
 
         // 保存ボタン
         document.getElementById('save-che').addEventListener('click', () => this.saveCHE());
@@ -88,14 +90,6 @@ const TeamEditor = {
             li.className = this.selectedSource.includes(index) ? 'selected' : '';
             li.draggable = true; // ドラッグ可能に
 
-            const color = team.primaryColor;
-
-            // カラーバー
-            const colorSpan = document.createElement('span');
-            colorSpan.className = 'team-color';
-            colorSpan.style.background = `rgb(${color.r}, ${color.g}, ${color.b})`;
-            li.appendChild(colorSpan);
-
             // チーム名
             const nameSpan = document.createElement('span');
             nameSpan.className = 'team-name';
@@ -128,14 +122,6 @@ const TeamEditor = {
             li.dataset.index = index;
             li.className = this.selectedOutput.includes(index) ? 'selected' : '';
             li.draggable = true; // ドラッグ可能に
-
-            const color = team.primaryColor;
-
-            // カラーバー
-            const colorSpan = document.createElement('span');
-            colorSpan.className = 'team-color';
-            colorSpan.style.background = `rgb(${color.r}, ${color.g}, ${color.b})`;
-            li.appendChild(colorSpan);
 
             // チーム名
             const nameSpan = document.createElement('span');
@@ -204,12 +190,18 @@ const TeamEditor = {
     },
 
     /**
-     * 選択したチームを出力リストに追加
+     * 選択したチームを出力リストに追加（最大16チーム）
      */
     addTeams: function () {
         const selected = this.selectedSource.sort((a, b) => a - b);
 
         selected.forEach(index => {
+            // 16チーム上限チェック
+            if (this.outputTeams.length >= 16) {
+                App.showToast('最大16チームまでです', 'error');
+                return;
+            }
+
             const team = this.sourceTeams[index];
             if (!this.outputTeams.some(t => t.globalIndex === team.globalIndex)) {
                 this.outputTeams.push({ ...team });
@@ -310,6 +302,25 @@ const TeamEditor = {
     },
 
     /**
+     * 全てクリア（ソースと出力両方）
+     */
+    clearAll: function () {
+        this.sourceTeams = [];
+        this.outputTeams = [];
+        this.selectedSource = [];
+        this.selectedOutput = [];
+        this.rawBuffers = [];
+        this.renderSourceList();
+        this.renderOutputList();
+
+        // ファイルリストも非表示に
+        document.getElementById('file-list').classList.add('hidden');
+        document.getElementById('loaded-files').innerHTML = '';
+
+        App.showToast('全てクリアしました', 'success');
+    },
+
+    /**
      * CHEファイルとして保存
      */
     saveCHE: function () {
@@ -335,23 +346,24 @@ const TeamEditor = {
 
         try {
             let buffer;
-            let filename;
+
+            // ファイル名を取得
+            let filename = document.getElementById('output-filename').value.trim() || 'output';
+            // 拡張子を除去して.CHEを付ける
+            filename = filename.replace(/\.che$/i, '') + '.CHE';
 
             if (format === 'match') {
                 // マッチデータ形式（CEMD）
-                // 注: 勝敗データは保存しない（ユーザー要望）
                 buffer = CHEParser.generateMatchFile(this.outputTeams, tournamentName);
-                filename = 'match_output.CHE';
             } else {
                 // チームデータ連結形式
                 buffer = CHEParser.generateTeamFile(this.outputTeams);
-                filename = 'team_output.CHE';
             }
 
             // ダウンロード（file://プロトコル対応）
             this.downloadFile(buffer, filename);
 
-            App.showToast(`${filename} を保存しました`, 'success');
+            App.showToast(`${this.outputTeams.length}チームを保存しました (${filename})`, 'success');
         } catch (e) {
             console.error('Save error:', e);
             App.showToast('保存中にエラーが発生しました: ' + e.message, 'error');
@@ -382,6 +394,111 @@ const TeamEditor = {
     },
 
     /**
+     * ドラッグ&ドロップ機能を設定（イベントデリゲーション方式）
+     */
+    setupDragAndDrop: function (listId, listProp) {
+        const list = document.getElementById(listId);
+        if (!list) return;
+
+        // 既存のイベントリスナーを削除（重複登録を防ぐ）
+        if (list._dragHandlers) {
+            list.removeEventListener('dragstart', list._dragHandlers.dragstart, true);
+            list.removeEventListener('dragend', list._dragHandlers.dragend, true);
+            list.removeEventListener('dragover', list._dragHandlers.dragover);
+            list.removeEventListener('drop', list._dragHandlers.drop);
+        }
+
+        let draggedItem = null;
+
+        // イベントハンドラーを作成（後で削除できるように保存）
+        const handlers = {
+            dragstart: (e) => {
+                if (e.target.tagName === 'LI') {
+                    draggedItem = e.target;
+                    e.target.style.opacity = '0.5';
+                    e.dataTransfer.effectAllowed = 'move';
+                }
+            },
+            dragend: (e) => {
+                if (e.target.tagName === 'LI') {
+                    e.target.style.opacity = '';
+                    draggedItem = null;
+                }
+            },
+            dragover: (e) => {
+                e.preventDefault();
+                if (draggedItem) {
+                    const afterElement = this.getDragAfterElement(list, e.clientY);
+                    if (afterElement == null) {
+                        list.appendChild(draggedItem);
+                    } else {
+                        list.insertBefore(draggedItem, afterElement);
+                    }
+                }
+            },
+            drop: (e) => {
+                e.preventDefault();
+                if (draggedItem) {
+                    this.updateListOrder(listId, listProp);
+                }
+            }
+        };
+
+        // 親要素にイベントリスナーを設定（イベントデリゲーション）
+        list.addEventListener('dragstart', handlers.dragstart, true);
+        list.addEventListener('dragend', handlers.dragend, true);
+        list.addEventListener('dragover', handlers.dragover);
+        list.addEventListener('drop', handlers.drop);
+
+        // ハンドラーを保存（次回の呼び出し時に削除できるように）
+        list._dragHandlers = handlers;
+    },
+
+    /**
+     * ドラッグ位置に基づいて挿入位置を決定
+     */
+    getDragAfterElement: function (container, y) {
+        const draggableElements = [...container.querySelectorAll('li:not(.dragging)')];
+
+        return draggableElements.reduce((closest, child) => {
+            const box = child.getBoundingClientRect();
+            const offset = y - box.top - box.height / 2;
+
+            if (offset < 0 && offset > closest.offset) {
+                return { offset: offset, element: child };
+            } else {
+                return closest;
+            }
+        }, { offset: Number.NEGATIVE_INFINITY }).element;
+    },
+
+    /**
+     * リストの順序を更新
+     */
+    updateListOrder: function (listId, listProp) {
+        const list = document.getElementById(listId);
+        if (!list) return;
+
+        const newOrder = [];
+        list.querySelectorAll('li').forEach(item => {
+            const index = parseInt(item.dataset.index);
+            newOrder.push(this[listProp][index]);
+        });
+
+        // 配列を更新
+        this[listProp] = newOrder;
+
+        // 選択状態をクリア（インデックスがずれるため）
+        if (listProp === 'sourceTeams') {
+            this.selectedSource = [];
+            this.renderSourceList();
+        } else {
+            this.selectedOutput = [];
+            this.renderOutputList();
+        }
+    },
+
+    /**
      * リセット
      */
     reset: function () {
@@ -392,73 +509,6 @@ const TeamEditor = {
         this.rawBuffers = [];
         this.renderSourceList();
         this.renderOutputList();
-    },
-
-    /**
-     * ドラッグ&ドロップの設定
-     */
-    setupDragAndDrop: function (listId, arrayName) {
-        const list = document.getElementById(listId);
-        let draggedItem = null;
-        let draggedIndex = null;
-
-        list.addEventListener('dragstart', (e) => {
-            if (e.target.tagName !== 'LI') return;
-            draggedItem = e.target;
-            draggedIndex = parseInt(e.target.dataset.index);
-            e.target.classList.add('dragging');
-            e.dataTransfer.effectAllowed = 'move';
-        });
-
-        list.addEventListener('dragend', (e) => {
-            if (e.target.tagName !== 'LI') return;
-            e.target.classList.remove('dragging');
-            // ドロップ先インジケータを消す
-            list.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
-            draggedItem = null;
-            draggedIndex = null;
-        });
-
-        list.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = 'move';
-
-            const target = e.target.closest('li');
-            if (!target || target === draggedItem) return;
-
-            // 他の要素のハイライトを消す
-            list.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
-            target.classList.add('drag-over');
-        });
-
-        list.addEventListener('dragleave', (e) => {
-            const target = e.target.closest('li');
-            if (target) {
-                target.classList.remove('drag-over');
-            }
-        });
-
-        list.addEventListener('drop', (e) => {
-            e.preventDefault();
-            const target = e.target.closest('li');
-            if (!target || target === draggedItem) return;
-
-            const targetIndex = parseInt(target.dataset.index);
-            const array = this[arrayName];
-
-            // 配列内の要素を移動
-            const [movedItem] = array.splice(draggedIndex, 1);
-            array.splice(targetIndex, 0, movedItem);
-
-            // 選択状態をクリア
-            if (arrayName === 'sourceTeams') {
-                this.selectedSource = [];
-                this.renderSourceList();
-            } else {
-                this.selectedOutput = [];
-                this.renderOutputList();
-            }
-        });
     }
 };
 
