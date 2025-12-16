@@ -100,14 +100,15 @@ const CHEParser = {
         // 0x30は初期化パターン(0xCDCDCDCD)
         const header = {
             magic: this.readString(bytes, 0, 4),
-            headerSize: this.readUint16(bytes, 4),
+            headerSize: this.readUint32(bytes, 4),
             version: this.readString(bytes, 8, 8).replace(/\0/g, ''),
-            tournamentName: Encoding.toUTF8(bytes.slice(0x10, 0x30)),
+            // 大会名は0x018(24B)と0x168(24B)に入っていることが多い
+            tournamentName: Encoding.toUTF8(bytes.slice(0x18, 0x18 + 24)),
             teamCount: this.readUint32(bytes, 0x34),
             matchCount: this.readUint32(bytes, 0x38)
         };
         console.log('Match Header:', header);
-        console.log('Raw Tournament Name Bytes:', bytes.slice(0x10, 0x30));
+        console.log('Raw Tournament Name Bytes:', bytes.slice(0x18, 0x18 + 24));
         console.log('Parsed Tournament Name:', header.tournamentName);
 
         // チーム情報とマッチ結果を抽出
@@ -263,54 +264,8 @@ const CHEParser = {
             results[i] = new Array(teamCount).fill(0);
         }
 
-        // 勝敗データの読み込み
-        // 15チーム総当たり = 105試合
-        // データ格納場所: 0x3208 + 832 (チームデータ終了) 以降？
-        // 実際にはファイルの末尾付近にあると思われるが、詳細なオフセットは不明。
-        // ここでは仮に、0x3548 (SLOT_START_OFFSET + 15 * SLOT_SIZE) から読み込むとする。
-
-        const matchStartOffset = 0x488 + (15 * 832); // 0x3548
-
-        if (matchStartOffset >= bytes.length) {
-            console.warn('Match data offset out of range');
-            return results;
-        }
-
-        let currentByte = 0;
-        let bitPos = 0;
-        let byteOffset = 0;
-
-        for (let i = 0; i < 15; i++) {
-            for (let j = i + 1; j < 15; j++) {
-                if (bitPos === 0) {
-                    if (matchStartOffset + byteOffset < bytes.length) {
-                        currentByte = bytes[matchStartOffset + byteOffset];
-                    } else {
-                        currentByte = 0;
-                    }
-                    byteOffset++;
-                }
-
-                // 2bit読み込み
-                const res = (currentByte >> bitPos) & 0x03;
-                bitPos += 2;
-                if (bitPos >= 8) bitPos = 0;
-
-                // 実際のチーム数内であれば結果を格納
-                if (i < teamCount && j < teamCount) {
-                    results[i][j] = res;
-
-                    // 対称性の維持
-                    let opponentRes = 0;
-                    if (res === 1) opponentRes = 2; // 勝 -> 負
-                    else if (res === 2) opponentRes = 1; // 負 -> 勝
-                    else opponentRes = res; // 引分(3) -> 引分(3), なし(0) -> なし(0)
-
-                    results[j][i] = opponentRes;
-                }
-            }
-        }
-
+        // 勝敗データ領域のオフセットが未確定のため、現状は「全て対戦なし(0)」として扱う。
+        // （Webアプリ上ではユーザーが手動で勝敗表を編集できるため、初期値が0であれば十分）
         return results;
     },
 
@@ -446,8 +401,8 @@ const CHEParser = {
         // ヘッダー: 大会名を書き込み
         const tNameBytes = Encoding.toSJIS(tournamentName);
         // 0x18: 大会名1
-        for (let i = 0x18; i < 0x28; i++) output[i] = 0;
-        for (let i = 0; i < tNameBytes.length && i < 16; i++) {
+        for (let i = 0x18; i < 0x18 + 24; i++) output[i] = 0;
+        for (let i = 0; i < tNameBytes.length && i < 24; i++) {
             output[0x18 + i] = tNameBytes[i];
         }
         // 0x168: 大会名2
@@ -564,6 +519,10 @@ const CHEParser = {
                     }
                 }
 
+                // チームID/登録順番号（slot+0x0B4）
+                // 実ファイルでは飛び飛びのケースもあるが、生成時はスロット順で連番にしておく
+                view.setUint32(slotStart + 0x0B4, index, true);
+
                 // OKEサマリーの初期化（無効スロットを有効化）
                 // SML.CHEのBlock 0,1,2に有効なOKEがある（ほのお/くさ/みずタイプ）
                 // 構造: [index(4B)][magic(4B)][flag(4B)][stats(36B)]
@@ -574,9 +533,19 @@ const CHEParser = {
 
                     // 現在のインデックスを確認
                     const currentIndex = view.getUint32(okeOffset, true);
+                    let nextIndex = currentIndex;
+
+                    // 参照先ブロックが「空」（サマリー先頭が0）なら、既定OKEに置き換える
+                    if (currentIndex < 31) {
+                        const summaryOffset = OKE_BLOCK_START + (currentIndex * OKE_BLOCK_SIZE) + 0x1C94;
+                        const isBlockEmpty = summaryOffset + 1 <= TOTAL_FILE_SIZE && output[summaryOffset] === 0;
+                        if (isBlockEmpty) {
+                            nextIndex = 0xFFFFFFFF;
+                        }
+                    }
 
                     // 無効(-1)または0xCDパディングの場合、有効なインデックスで初期化
-                    if (currentIndex === 0xFFFFFFFF || currentIndex === 0xCDCDCDCD) {
+                    if (nextIndex === 0xFFFFFFFF || nextIndex === 0xCDCDCDCD) {
                         // インデックスを設定（Slot 0と同じOKEを参照）
                         view.setUint32(okeOffset, BASE_OKE_INDICES[okeNum], true);
 
@@ -596,6 +565,24 @@ const CHEParser = {
                         }
 
                         console.log(`    OKE${okeNum + 1} initialized: index=${BASE_OKE_INDICES[okeNum]}`);
+                    } else {
+                        // インデックスが有効でも、magic/flagが未初期化の場合は補正しておく
+                        const magicOk =
+                            output[okeOffset + 4] === OKE_MAGIC[0] &&
+                            output[okeOffset + 5] === OKE_MAGIC[1] &&
+                            output[okeOffset + 6] === OKE_MAGIC[2] &&
+                            output[okeOffset + 7] === OKE_MAGIC[3];
+                        const flagOk =
+                            output[okeOffset + 8] === OKE_FLAG[0] &&
+                            output[okeOffset + 9] === OKE_FLAG[1] &&
+                            output[okeOffset + 10] === OKE_FLAG[2] &&
+                            output[okeOffset + 11] === OKE_FLAG[3];
+
+                        if (!magicOk || !flagOk) {
+                            for (let b = 0; b < 4; b++) output[okeOffset + 4 + b] = OKE_MAGIC[b];
+                            for (let b = 0; b < 4; b++) output[okeOffset + 8 + b] = OKE_FLAG[b];
+                            for (let b = 12; b < 48; b++) output[okeOffset + b] = 0;
+                        }
                     }
                 }
 
@@ -607,58 +594,7 @@ const CHEParser = {
         // PSPはスロット領域に有効なデータ構造を期待するため、ゼロクリアすると破損扱いになる
         console.log(`Slots ${teams.length + 1}-16: keeping template data`);
 
-        // マッチ結果の書き込み
-        // 15チーム総当たり = 105試合
-        // 各試合の結果は2ビットで表現されると思われるが、解析によると
-        // 0x3208以降のチームデータ領域の後ろに結果データがある？
-        // いや、extractMatchResultsの実装を見ると、チームデータ領域の後ろではなく
-        // ファイルの末尾の方にあるはず。
-
-        // 解析に基づく結果データオフセット
-        // 15チームの場合、0x3208 + 832 = 0x3548 がチームデータの終わり
-        // 結果データはどこ？
-        // extractMatchResultsでは:
-        // const matchDataOffset = 0x3548; // 仮定
-
-        // ユーザー要望により、勝敗データは保存しない
-        // 全試合「対戦なし(0)」で埋める
-
-        const matchStartOffset = SLOT_START_OFFSET + (15 * SLOT_SIZE); // 0x3548
-
-        // 結果データの書き込み
-        // 1バイトに4試合分の結果が入る (2bit * 4)
-        // 00: なし, 01: 勝(Home), 10: 負(Home), 11: 引分
-
-        let currentByte = 0;
-        let bitPos = 0;
-        let byteOffset = 0;
-
-        for (let i = 0; i < 15; i++) {
-            for (let j = i + 1; j < 15; j++) {
-                // 常に「対戦なし(0)」を書き込む
-                let res = 0;
-
-                // 2bit書き込み
-                // 下位ビットから埋めるか上位からか？
-                // extractMatchResults: (byte >> (k * 2)) & 0x03
-                // 下位ビットから順に埋まっている
-
-                currentByte |= (res & 0x03) << bitPos;
-                bitPos += 2;
-
-                if (bitPos >= 8) {
-                    view.setUint8(matchStartOffset + byteOffset, currentByte);
-                    byteOffset++;
-                    currentByte = 0;
-                    bitPos = 0;
-                }
-            }
-        }
-
-        // 残りのバイトを書き込み
-        if (bitPos > 0) {
-            view.setUint8(matchStartOffset + byteOffset, currentByte);
-        }
+        // ユーザー要望により、勝敗データは保存しない（テンプレートのまま維持）
 
         console.log('Match file generation complete');
         return output.buffer;
